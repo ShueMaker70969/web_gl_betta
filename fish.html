@@ -1,0 +1,337 @@
+<html>
+<head>
+  <title>Snake-like chain</title>
+</head>
+<body>
+  <canvas id="glCanvas" width="400" height="400" style="width: 400px; height: 400px;"></canvas>
+
+  <!-- Vertex shader -->
+  <script id="vertex-shader" type="notjs">
+    #version 300 es
+
+    in vec2 pos;
+
+    void main() {
+      gl_Position = vec4(pos, 0.0, 1.0);
+    }
+  </script>
+
+  <!-- Fragment shader -->
+  <script id="fragment-shader" type="notjs">
+#version 300 es
+precision mediump float;
+
+#define MAX_SEGMENTS 64
+
+// ヒレ用のパラメータ
+const int   NUM_FINS      = 20;     // ひらめかせる点の本数
+const float FIN_SPACING   = 0.06;  // 尻尾から何段階か後ろに並べる距離（UV）
+const float FIN_AMPLITUDE = 0.004;  // 法線方向の振れ幅（UV）
+const float FIN_SIZE      = 0.015; // ひれ点の大きさ（UV半径）
+
+// 既存
+uniform vec2  u_mouse;        // 現フレームのマウス位置 (0〜1)
+uniform vec2  u_dir;          // スムージングされた進行方向ベクトル
+uniform float u_radius;       // セグメントの半径
+uniform vec2  u_resolution;   // 解像度
+
+uniform int   u_segment_count;
+uniform vec2  u_segments[MAX_SEGMENTS];
+
+// 追加：時間（秒）
+uniform float u_time;
+
+out vec4 outColor;
+
+void main() {
+    vec2 uv = gl_FragCoord.xy / u_resolution;
+
+    vec3 col = vec3(0.0);
+
+    // ============================
+    // 1) ヘビ本体（セグメントの列）
+    // ============================
+    float denom = max(float(u_segment_count - 1), 1.0);
+
+    for (int i = 0; i < MAX_SEGMENTS; ++i) {
+        if (i >= u_segment_count) break;
+
+        vec2 seg = u_segments[i];
+        float d = distance(uv, seg);
+
+        // 半径 u_radius のなめらかな円
+        float body = 1.0 - smoothstep(0.0, u_radius, d);
+
+        // 尾に行くほど少し暗く
+        float shade = 1.0 - float(i) / denom;
+
+        col += vec3(body * shade);
+    }
+
+    // ============================
+    // 2) 頭の方向マーカー（前・右・左）
+    // ============================
+    vec2 center = u_mouse;
+    vec2 dir    = normalize(u_dir);
+
+    vec2 right_dir = vec2(dir.y, -dir.x);
+    vec2 left_dir  = vec2(-dir.y, dir.x);
+
+    vec2 forward = center + dir       * u_radius;
+    vec2 right   = center + right_dir * u_radius;
+    vec2 left    = center + left_dir  * u_radius;
+
+    float pf = 1.0 - smoothstep(0.0, 0.02, distance(uv, forward));
+    float pr = 1.0 - smoothstep(0.0, 0.02, distance(uv, right));
+    float pl = 1.0 - smoothstep(0.0, 0.02, distance(uv, left));
+
+    col += vec3(pf, 0.0, 0.0);   // 正面 → 赤
+    col += vec3(0.0, pr, 0.0);   // 右   → 緑
+    col += vec3(0.0, 0.0, pl);   // 左   → 青
+
+    // ============================
+    // 3) 尻尾付近の「ひらひらヒレ」
+    // ============================
+
+    if (u_segment_count >= 2) {
+        // 尻尾と一つ前のセグメント
+        int tail_i = u_segment_count - 1;
+        int prev_i = max(tail_i - 1, 0);
+
+        vec2 tail      = u_segments[tail_i];
+        vec2 prev_tail = u_segments[prev_i];
+
+        vec2 tail_dir = tail - prev_tail;
+        float len_td  = length(tail_dir);
+        if (len_td > 1e-5) {
+            tail_dir /= len_td;
+        } else {
+            tail_dir = vec2(0.0, 1.0); // 何かあった時のデフォルト
+        }
+
+        // 尻尾方向の法線（左右両方にヒレを出す）
+        vec2 n = vec2(-tail_dir.y, tail_dir.x);
+
+        vec3 fin_color = vec3(0.4, 0.7, 1.0); // 水色っぽい
+
+        for (int k = 0; k < NUM_FINS; ++k) {
+            float t = float(k) / float(NUM_FINS - 1);  // 0〜1
+
+            // 尻尾から少し後ろにずらしたベース位置
+            vec2 base = tail - tail_dir * (t * FIN_SPACING);
+
+            // 時間で揺れるオフセット（sin波）
+            float phase = u_time * 4.0 + t * 6.28318;
+            float wave  = sin(phase); // -1〜1
+
+            // 左右2方向にヒレを生やす
+            for (int s = -1; s <= 1; s += 2) {
+                float side = float(s);
+                vec2 fin_pos = base + n * (wave * FIN_AMPLITUDE * side);
+
+                float d_fin = distance(uv, fin_pos);
+                float fin   = 1.0 - smoothstep(0.0, FIN_SIZE, d_fin);
+
+                col += fin * fin_color;
+            }
+        }
+    }
+
+    outColor = vec4(col, 1.0);
+}
+</script>
+
+
+  <script type="text/javascript">
+    function createProgram(gl, vertexSrc, fragmentSrc) {
+      let vshd = gl.createShader(gl.VERTEX_SHADER);
+      gl.shaderSource(vshd, vertexSrc);
+      gl.compileShader(vshd);
+      if (!gl.getShaderParameter(vshd, gl.COMPILE_STATUS))
+        throw new Error("Unable to compile shader: " + gl.getShaderInfoLog(vshd));
+
+      let fshd = gl.createShader(gl.FRAGMENT_SHADER);
+      gl.shaderSource(fshd, fragmentSrc);
+      gl.compileShader(fshd);
+      if (!gl.getShaderParameter(fshd, gl.COMPILE_STATUS))
+        throw new Error("Unable to compile shader: " + gl.getShaderInfoLog(fshd));
+
+      let prog = gl.createProgram();
+      gl.attachShader(prog, vshd);
+      gl.attachShader(prog, fshd);
+      gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
+        throw new Error("Unable to link program: " + gl.getProgramInfoLog(prog));
+      return prog;
+    }
+
+    function init() {
+      var c = document.getElementById("glCanvas");
+      var gl = c.getContext('webgl2');
+      if (!gl)
+        throw new Error("WebGL unsupported!");
+
+      // Clear screen, set to black background
+      gl.clearColor(0, 0, 0, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+
+      // フルスクリーンクアッド
+      var vertexPosBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, vertexPosBuffer);
+      var vertices = [
+        -1, -1,
+         1, -1,
+        -1,  1,
+         1,  1
+      ];
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+      vertexPosBuffer.itemSize = 2;
+      vertexPosBuffer.numItems = 4;
+
+      // シェーダプログラム
+      var vs = document.querySelector("#vertex-shader").text.trim();
+      var fs = document.querySelector("#fragment-shader").text.trim();
+      var program = createProgram(gl, vs, fs);
+      gl.useProgram(program);
+
+      // === uniform: 半径・解像度 ===
+      const u_radius = gl.getUniformLocation(program, 'u_radius');
+      gl.uniform1f(u_radius, 0.05); // セグメント半径（UV空間）
+
+      const uResolution = gl.getUniformLocation(program, 'u_resolution');
+      gl.uniform2f(uResolution, gl.drawingBufferWidth, gl.drawingBufferHeight);
+
+      // 頂点属性
+      program.vertexPosAttrib = gl.getAttribLocation(program, 'pos');
+
+      // === uniform: マウスと方向 ===
+      var mouse_address     = gl.getUniformLocation(program, "u_mouse");
+      let direction_address = gl.getUniformLocation(program, "u_dir");
+
+      let mouse_loc      = { x: 0.5, y: 0.5 };
+      let mouse_loc_prev = { x: 0.5, y: 0.5 };
+      let direction      = { x: 0.0, y: 1.0 }; // 初期向き：上
+
+      // === 蛇のセグメント ===
+      const segment_count    = 40;    // 節の数
+      const segment_distance = 0.01;  // セグメント間の距離（UV空間）
+
+      const u_segments_location       = gl.getUniformLocation(program, 'u_segments[0]');
+      const u_segment_count_location  = gl.getUniformLocation(program, 'u_segment_count');
+      gl.uniform1i(u_segment_count_location, segment_count);
+
+      // セグメント位置配列 (0 = 頭)
+      let segment_positions = [];
+      for (let i = 0; i < segment_count; i++) {
+        segment_positions.push({
+          x: 0.5 - i * segment_distance,  // 左方向に並べて初期化
+          y: 0.5
+        });
+      }
+
+      // セグメント配列を uniform に送る関数
+      function update_snake_uniform() {
+        // 頭をマウス位置に合わせる
+        segment_positions[0].x = mouse_loc.x;
+        segment_positions[0].y = mouse_loc.y;
+
+        // 各セグメントを「前のセグメントから一定距離」になるように揃える
+        for (let i = 1; i < segment_count; i++) {
+          const prev = segment_positions[i - 1];
+          const curr = segment_positions[i];
+
+          let vx = curr.x - prev.x;
+          let vy = curr.y - prev.y;
+          const dist = Math.hypot(vx, vy);
+
+          if (dist < 1e-6) {
+            // 動き出す前など、距離がほぼゼロのときは前と同じにしておく
+            segment_positions[i].x = prev.x;
+            segment_positions[i].y = prev.y;
+          } else {
+            const t = segment_distance / dist;
+            segment_positions[i].x = prev.x + vx * t;
+            segment_positions[i].y = prev.y + vy * t;
+          }
+        }
+
+        // vec2 配列として GPU に送る
+        const segment_data = new Float32Array(segment_count * 2);
+        for (let i = 0; i < segment_count; i++) {
+          segment_data[i * 2 + 0] = segment_positions[i].x;
+          segment_data[i * 2 + 1] = segment_positions[i].y;
+        }
+
+        gl.useProgram(program);
+        gl.uniform1i(u_segment_count_location, segment_count);
+        gl.uniform2fv(u_segments_location, segment_data);
+      }
+
+      // 初期状態も送っておく
+      update_snake_uniform();
+
+      // === マウスイベント ===
+      function getMousePosition(event) {
+        // 前フレームの座標を保存
+        mouse_loc_prev.x = mouse_loc.x;
+        mouse_loc_prev.y = mouse_loc.y;
+
+        // マウス座標を UV に変換
+        mouse_loc.x = event.clientX / c.width;
+        mouse_loc.y = 1.0 - (event.clientY / c.height);
+
+        // 素の方向ベクトル
+        const raw_dx  = mouse_loc.x - mouse_loc_prev.x;
+        const raw_dy  = mouse_loc.y - mouse_loc_prev.y;
+        const raw_len = Math.hypot(raw_dx, raw_dy);
+
+        if (raw_len > 1e-4) {
+          const raw_dir_x = raw_dx / raw_len;
+          const raw_dir_y = raw_dy / raw_len;
+
+          const alpha = 0.2;  // スムージング係数（小さいほどヌルヌル）
+
+          direction.x = (1.0 - alpha) * direction.x + alpha * raw_dir_x;
+          direction.y = (1.0 - alpha) * direction.y + alpha * raw_dir_y;
+
+          const dlen = Math.hypot(direction.x, direction.y);
+          if (dlen > 1e-6) {
+            direction.x /= dlen;
+            direction.y /= dlen;
+          }
+        }
+
+        // uniform 更新
+        gl.useProgram(program);
+        gl.uniform2f(mouse_address, mouse_loc.x, mouse_loc.y);
+        gl.uniform2f(direction_address, direction.x, direction.y);
+
+
+        // ヘビ本体（セグメント）の位置も更新
+        update_snake_uniform();
+      }
+
+      c.addEventListener("mousemove", getMousePosition);
+      const u_time_loc = gl.getUniformLocation(program, "u_time");
+      // === レンダリングループ ===
+      function render(time_ms) {
+        const time_sec = time_ms * 0.001;
+
+        gl.useProgram(program);
+        gl.uniform1f(u_time_loc, time_sec);
+
+        gl.clear(gl.COLOR_BUFFER_BIT);
+
+        gl.enableVertexAttribArray(program.vertexPosAttrib);
+        gl.vertexAttribPointer(program.vertexPosAttrib, 2, gl.FLOAT, false, 0, 0);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+        requestAnimationFrame(render);
+      }
+      requestAnimationFrame(render);
+    }
+
+    window.onload = init;
+  </script>
+</body>
+</html>
