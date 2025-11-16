@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Betta Fish — finGroups (vertex shader version)</title>
+</head>
+<body>
+<canvas id="glCanvas" width="400" height="400" style="width: 400px; height: 400px;"></canvas>
+
+<!-- Vertex shader: 各セグメントを POINT で描画 -->
+<script id="vertex-shader" type="notjs">
+#version 300 es
+in vec2  a_pos;       // セグメント位置（0〜1）
+in float a_kind;      // 0 = 本体, 1 = ヒレ
+in float a_relIndex;  // 各チェーン内 or 本体内での相対位置 (0〜1)
+
+uniform float u_radius;      // 本体の基準半径（UV 空間）
+uniform vec2  u_resolution;  // 画面サイズ
+
+out vec4 v_color;
+
+void main() {
+  // 0〜1 の座標を NDC (-1〜1) に変換
+  vec2 clip = a_pos * 2.0 - 1.0;
+  clip.y = -clip.y; // Y 軸反転（スクリーン座標 → GL 座標）
+  gl_Position = vec4(clip, 0.0, 1.0);
+
+  // 本体とヒレでポイントサイズを変える
+  float bodyRadius = u_radius;
+  float finRadius  = u_radius * 0.4;
+  // a_kind = 0 → bodyRadius, a_kind = 1 → finRadius
+  float radius = mix(finRadius, bodyRadius, 1.0 - a_kind);
+
+  // UV 空間の半径 → ピクセルサイズに変換
+  float minRes = min(u_resolution.x, u_resolution.y);
+  gl_PointSize = radius * minRes * 2.0;  // 直径相当
+
+  // 色もここで決めてしまう
+  if (a_kind < 0.5) {
+    // 本体：尾に近いほど暗く
+    float shade = 1.0 - a_relIndex; // 0:頭, 1:尾
+    v_color = vec4(vec3(shade), 1.0);
+  } else {
+    // ヒレ：先端に向かって少し暗く
+    float finShade = 0.4 + 0.6 * (1.0 - a_relIndex);
+    vec3 base = vec3(0.05, 0.1, 0.3);
+    v_color = vec4(base * finShade, 1.0);
+  }
+}
+</script>
+
+<!-- Fragment shader: POINT を丸く切り抜く -->
+<script id="fragment-shader" type="notjs">
+#version 300 es
+precision mediump float;
+
+in vec4 v_color;
+out vec4 outColor;
+
+void main() {
+  // gl_PointCoord: [0,1]x[0,1] のローカル座標
+  vec2 p = gl_PointCoord * 2.0 - 1.0; // -1〜1
+  float d = length(p);
+
+  // 丸いマスク（外側をフェードアウト）
+  float alpha = 1.0 - smoothstep(0.7, 1.0, d);
+  if (alpha <= 0.0) {
+    discard;
+  }
+
+  outColor = vec4(v_color.rgb * alpha, alpha);
+}
+</script>
+
+<script type="text/javascript">
+  function createProgram(gl, vertexSrc, fragmentSrc) {
+    const vshd = gl.createShader(gl.VERTEX_SHADER);
+    gl.shaderSource(vshd, vertexSrc);
+    gl.compileShader(vshd);
+    if (!gl.getShaderParameter(vshd, gl.COMPILE_STATUS)) {
+      throw new Error("VS compile error: " + gl.getShaderInfoLog(vshd));
+    }
+
+    const fshd = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(fshd, fragmentSrc);
+    gl.compileShader(fshd);
+    if (!gl.getShaderParameter(fshd, gl.COMPILE_STATUS)) {
+      throw new Error("FS compile error: " + gl.getShaderInfoLog(fshd));
+    }
+
+    const prog = gl.createProgram();
+    gl.attachShader(prog, vshd);
+    gl.attachShader(prog, fshd);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      throw new Error("Link error: " + gl.getProgramInfoLog(prog));
+    }
+    return prog;
+  }
+
+  function init() {
+    const c  = document.getElementById("glCanvas");
+    const gl = c.getContext('webgl2');
+    if (!gl) throw new Error("WebGL2 unsupported");
+
+    gl.clearColor(0, 0, 0, 1);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+    const vs = document.querySelector("#vertex-shader").text.trim();
+    const fs = document.querySelector("#fragment-shader").text.trim();
+    const program = createProgram(gl, vs, fs);
+    gl.useProgram(program);
+
+    // === attribute locations ===
+    const a_pos_loc      = gl.getAttribLocation(program, "a_pos");
+    const a_kind_loc     = gl.getAttribLocation(program, "a_kind");
+    const a_relIndex_loc = gl.getAttribLocation(program, "a_relIndex");
+
+    // === uniform locations ===
+    const u_radius_loc     = gl.getUniformLocation(program, "u_radius");
+    const u_resolution_loc = gl.getUniformLocation(program, "u_resolution");
+    // 以下はシェーダー内では使っていないが、既存コードとの互換用に残してもOK（場所がなければ null になる）
+    const u_mouse_loc      = gl.getUniformLocation(program, "u_mouse");
+    const u_dir_loc        = gl.getUniformLocation(program, "u_dir");
+    const u_time_loc       = gl.getUniformLocation(program, "u_time");
+
+    gl.uniform1f(u_radius_loc, 0.05);
+    gl.uniform2f(u_resolution_loc, gl.drawingBufferWidth, gl.drawingBufferHeight);
+
+    // === バッファ（頂点属性） ===
+    const posBuffer      = gl.createBuffer();
+    const kindBuffer     = gl.createBuffer();
+    const relIndexBuffer = gl.createBuffer();
+
+    // === マウス & 方向 ===
+    let mouse_loc      = { x: 0.5, y: 0.5 };
+    let mouse_loc_prev = { x: 0.5, y: 0.5 };
+    let direction      = { x: 0.0, y: 1.0 }; // 上向き初期
+
+    function onMouseMove(event) {
+      mouse_loc_prev.x = mouse_loc.x;
+      mouse_loc_prev.y = mouse_loc.y;
+
+      const rect = c.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+
+      mouse_loc.x = x / c.width;
+      mouse_loc.y = 1.0 - (y / c.height);
+
+      const raw_dx  = mouse_loc.x - mouse_loc_prev.x;
+      const raw_dy  = mouse_loc.y - mouse_loc_prev.y;
+      const raw_len = Math.hypot(raw_dx, raw_dy);
+
+      if (raw_len > 1e-4) {
+        const raw_dir_x = raw_dx / raw_len;
+        const raw_dir_y = raw_dy / raw_len;
+
+        const alpha = 0.2; // スムージング
+        direction.x = (1.0 - alpha) * direction.x + alpha * raw_dir_x;
+        direction.y = (1.0 - alpha) * direction.y + alpha * raw_dir_y;
+
+        const dlen = Math.hypot(direction.x, direction.y);
+        if (dlen > 1e-6) {
+          direction.x /= dlen;
+          direction.y /= dlen;
+        }
+      }
+    }
+    c.addEventListener("mousemove", onMouseMove);
+
+    // === 本体ヘビ（中心線） ===
+    const body_count        = 30;
+    const body_seg_distance = 0.015;
+
+    let body_positions = [];
+    for (let i = 0; i < body_count; i++) {
+      body_positions.push({
+        x: 0.5 - i * body_seg_distance,
+        y: 0.5
+      });
+    }
+
+    // === finGroups 設定 ===
+    const finGroups = [
+      {
+        name: "tail",
+        count: 20,
+        attachT: 0.7,
+        sideOffset: 0.0,
+        ampScale: 1.2,
+        speedScale: 0.01,
+        phaseOffset: 0.0
+      },
+      {
+        name: "dorsal",
+        count: 15,
+        attachT: 0.2,
+        sideOffset: +0.03,
+        ampScale: 0.7,
+        speedScale: 0.1,
+        phaseOffset: 1.5
+      },
+      {
+        name: "ventral",
+        count: 15,
+        attachT: 0.2,
+        sideOffset: -0.03,
+        ampScale: 0.7,
+        speedScale: 1.2,
+        phaseOffset: 3.0
+      }
+    ];
+
+    let fin_chain_count = 0;
+    for (const g of finGroups) fin_chain_count += g.count;
+
+    const fin_segments_per_chain = 20;
+    const fin_seg_distance       = 0.01;
+
+    let fin_positions      = [];
+    let fin_prev_positions = [];
+    let fin_phase          = [];
+
+    let fin_attach_t    = [];
+    let fin_side_offset = [];
+    let fin_amp_scale   = [];
+    let fin_speed_scale = [];
+    let fin_side_sign   = [];
+
+    // === finGroups からチェーンを生成 ===
+    for (const g of finGroups) {
+      for (let i = 0; i < g.count; i++) {
+        fin_attach_t.push(g.attachT);
+        fin_side_offset.push(g.sideOffset);
+        fin_amp_scale.push(g.ampScale);
+        fin_speed_scale.push(g.speedScale);
+
+        let sideSign = 1.0;
+        if (g.name === "tail") {
+          sideSign = (i % 2 === 0) ? 1.0 : -1.0;
+        } else {
+          sideSign = (g.sideOffset >= 0.0) ? 1.0 : -1.0;
+        }
+        fin_side_sign.push(sideSign);
+
+        const phase0 = Math.random() * Math.PI * 2.0 + g.phaseOffset;
+        fin_phase.push(phase0);
+
+        let arr = [];
+        let arr_prev = [];
+        const x0 = body_positions[body_count - 1].x;
+        const y0 = body_positions[body_count - 1].y;
+        for (let j = 0; j < fin_segments_per_chain; j++) {
+          arr.push({ x: x0, y: y0 });
+          arr_prev.push({ x: x0, y: y0 });
+        }
+        fin_positions.push(arr);
+        fin_prev_positions.push(arr_prev);
+      }
+    }
+
+    const total_segments = body_count + fin_chain_count * fin_segments_per_chain;
+    console.log("total_segments:", total_segments);
+
+    // === body 上の位置・接線・法線を取得するヘルパ ===
+    function getBodyFrame(t) {
+      const clamped = Math.max(0.0, Math.min(1.0, t));
+      const idxFloat = clamped * (body_count - 1);
+      const i0 = Math.floor(idxFloat);
+      const i1 = Math.min(i0 + 1, body_count - 1);
+      const w = idxFloat - i0;
+
+      const p0 = body_positions[i0];
+      const p1 = body_positions[i1];
+
+      const cx = p0.x * (1.0 - w) + p1.x * w;
+      const cy = p0.y * (1.0 - w) + p1.y * w;
+
+      let tx, ty;
+      if (i1 !== i0) {
+        tx = p1.x - p0.x;
+        ty = p1.y - p0.y;
+      } else if (i0 > 0) {
+        tx = p0.x - body_positions[i0 - 1].x;
+        ty = p0.y - body_positions[i0 - 1].y;
+      } else if (i0 + 1 < body_count) {
+        tx = body_positions[i0 + 1].x - p0.x;
+        ty = body_positions[i0 + 1].y - p0.y;
+      } else {
+        tx = 1.0;
+        ty = 0.0;
+      }
+      let tlen = Math.hypot(tx, ty);
+      if (tlen < 1e-6) {
+        tx = 1.0; ty = 0.0; tlen = 1.0;
+      }
+      tx /= tlen;
+      ty /= tlen;
+
+      const nx = -ty;
+      const ny =  tx;
+
+      return {
+        pos: { x: cx, y: cy },
+        tan: { x: tx, y: ty },
+        nor: { x: nx, y: ny }
+      };
+    }
+
+    // === 本体＋ヒレを更新して VBO に送る ===
+    function update_snake_and_fins(time_sec) {
+
+      const dx = mouse_loc.x - mouse_loc_prev.x;
+      const dy = mouse_loc.y - mouse_loc_prev.y;
+      const speed = Math.hypot(dx, dy);
+
+      let finMotionFactor = 1.0;
+      if (speed < 0.005) finMotionFactor = 0.0;
+
+      // 前フレーム保存（今は未使用だが残しておく）
+      for (let f = 0; f < fin_chain_count; f++) {
+        for (let j = 0; j < fin_segments_per_chain; j++) {
+          fin_prev_positions[f][j].x = fin_positions[f][j].x;
+          fin_prev_positions[f][j].y = fin_positions[f][j].y;
+        }
+      }
+
+      // 頭はマウス位置
+      body_positions[0].x = mouse_loc.x;
+      body_positions[0].y = mouse_loc.y;
+
+      // 本体：前のセグメントから一定距離
+      for (let i = 1; i < body_count; i++) {
+        const prev = body_positions[i - 1];
+        const curr = body_positions[i];
+
+        let vx = curr.x - prev.x;
+        let vy = curr.y - prev.y;
+        const dist = Math.hypot(vx, vy);
+
+        if (dist < 1e-6) {
+          body_positions[i].x = prev.x;
+          body_positions[i].y = prev.y;
+        } else {
+          const t = body_seg_distance / dist;
+          body_positions[i].x = prev.x + vx * t;
+          body_positions[i].y = prev.y + vy * t;
+        }
+      }
+
+      // ヒレチェーンの更新（チェーン追従）
+      for (let f = 0; f < fin_chain_count; f++) {
+        const attachT   = fin_attach_t[f];
+        const sideOff   = fin_side_offset[f];
+
+        const frame = getBodyFrame(attachT);
+        const rootX = frame.pos.x + frame.nor.x * sideOff;
+        const rootY = frame.pos.y + frame.nor.y * sideOff;
+
+        // 根元
+        fin_positions[f][0].x = rootX;
+        fin_positions[f][0].y = rootY;
+
+        // それ以降は前の節から一定距離
+        for (let j = 1; j < fin_segments_per_chain; j++) {
+          const prev = fin_positions[f][j - 1];
+          const curr = fin_positions[f][j];
+
+          let vx = curr.x - prev.x;
+          let vy = curr.y - prev.y;
+          const dist = Math.hypot(vx, vy);
+
+          if (dist < 1e-6) {
+            fin_positions[f][j].x = prev.x;
+            fin_positions[f][j].y = prev.y;
+          } else {
+            const t = fin_seg_distance / dist;
+            fin_positions[f][j].x = prev.x + vx * t;
+            fin_positions[f][j].y = prev.y + vy * t;
+          }
+        }
+      }
+
+      // ひらめき（サイン波オフセット）を追加
+      const base_amp   = 0.005;
+      const base_speed = 0.4;
+
+      for (let f = 0; f < fin_chain_count; f++) {
+        const phase      = fin_phase[f];
+        const sideSign   = fin_side_sign[f];
+        const ampScale   = fin_amp_scale[f];
+        const speedScale = fin_speed_scale[f];
+
+        for (let j = 1; j < fin_segments_per_chain; j++) {
+          const prev = fin_positions[f][j - 1];
+          const curr = fin_positions[f][j];
+
+          let dx = curr.x - prev.x;
+          let dy = curr.y - prev.y;
+          const len = Math.hypot(dx, dy);
+          if (len < 1e-6) continue;
+          dx /= len;
+          dy /= len;
+
+          const nx = -dy;
+          const ny =  dx;
+
+          const t = j / (fin_segments_per_chain - 1);
+
+          const amp   = base_amp * ampScale * t;
+          const omega = base_speed * speedScale;
+
+          const w = Math.sin(omega * time_sec + phase + t * 4.0) * finMotionFactor;
+          const offset = w * amp * sideSign;
+
+          fin_positions[f][j].x += nx * offset;
+          fin_positions[f][j].y += ny * offset;
+        }
+      }
+
+      // ===== VBO に詰める =====
+      const posArray      = new Float32Array(total_segments * 2);
+      const kindArray     = new Float32Array(total_segments);
+      const relIndexArray = new Float32Array(total_segments);
+
+      let idx = 0;
+
+      // 本体
+      for (let i = 0; i < body_count; i++) {
+        posArray[idx * 2 + 0] = body_positions[i].x;
+        posArray[idx * 2 + 1] = body_positions[i].y;
+        kindArray[idx]        = 0.0; // 本体
+        const denom = Math.max(body_count - 1, 1);
+        relIndexArray[idx]    = i / denom; // 頭→尾で 0→1
+        idx++;
+      }
+
+      // ヒレ
+      for (let f = 0; f < fin_chain_count; f++) {
+        for (let j = 0; j < fin_segments_per_chain; j++) {
+          posArray[idx * 2 + 0] = fin_positions[f][j].x;
+          posArray[idx * 2 + 1] = fin_positions[f][j].y;
+          kindArray[idx]        = 1.0; // ヒレ
+          const denom = Math.max(fin_segments_per_chain - 1, 1);
+          relIndexArray[idx]    = j / denom; // 根元→先端で 0→1
+          idx++;
+        }
+      }
+
+      gl.useProgram(program);
+
+      // 一応：未使用だが uniform セットしても害はない（loc が null なら無視される）
+      if (u_mouse_loc) gl.uniform2f(u_mouse_loc, mouse_loc.x, mouse_loc.y);
+      if (u_dir_loc)   gl.uniform2f(u_dir_loc,   direction.x,  direction.y);
+
+      // a_pos
+      gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, posArray, gl.DYNAMIC_DRAW);
+      gl.enableVertexAttribArray(a_pos_loc);
+      gl.vertexAttribPointer(a_pos_loc, 2, gl.FLOAT, false, 0, 0);
+
+      // a_kind
+      gl.bindBuffer(gl.ARRAY_BUFFER, kindBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, kindArray, gl.DYNAMIC_DRAW);
+      gl.enableVertexAttribArray(a_kind_loc);
+      gl.vertexAttribPointer(a_kind_loc, 1, gl.FLOAT, false, 0, 0);
+
+      // a_relIndex
+      gl.bindBuffer(gl.ARRAY_BUFFER, relIndexBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, relIndexArray, gl.DYNAMIC_DRAW);
+      gl.enableVertexAttribArray(a_relIndex_loc);
+      gl.vertexAttribPointer(a_relIndex_loc, 1, gl.FLOAT, false, 0, 0);
+    }
+
+    // === レンダリングループ ===
+    function render(time_ms) {
+      const time_sec = time_ms * 0.001;
+
+      gl.useProgram(program);
+      if (u_time_loc) gl.uniform1f(u_time_loc, time_sec);
+
+      update_snake_and_fins(time_sec);
+
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.drawArrays(gl.POINTS, 0, total_segments);
+
+      requestAnimationFrame(render);
+    }
+
+    requestAnimationFrame(render);
+  }
+
+  window.onload = init;
+</script>
+</body>
+</html>

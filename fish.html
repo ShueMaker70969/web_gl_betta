@@ -1,6 +1,8 @@
+<!DOCTYPE html>
 <html>
 <head>
-  <title>Snake with fin-chains</title>
+  <meta charset="utf-8" />
+  <title>Snake with fin-chains (grouped fins)</title>
 </head>
 <body>
   <canvas id="glCanvas" width="400" height="400" style="width: 400px; height: 400px;"></canvas>
@@ -163,8 +165,12 @@
         mouse_loc_prev.x = mouse_loc.x;
         mouse_loc_prev.y = mouse_loc.y;
 
-        mouse_loc.x = event.clientX / c.width;
-        mouse_loc.y = 1.0 - (event.clientY / c.height);
+        const rect = c.getBoundingClientRect();
+        const x = event.clientX - rect.left;
+        const y = event.clientY - rect.top;
+
+        mouse_loc.x = x / c.width;
+        mouse_loc.y = 1.0 - (y / c.height);
 
         const raw_dx  = mouse_loc.x - mouse_loc_prev.x;
         const raw_dy  = mouse_loc.y - mouse_loc_prev.y;
@@ -188,7 +194,7 @@
       c.addEventListener("mousemove", onMouseMove);
 
       // === 本体ヘビ ===
-      const body_count        =30;
+      const body_count        = 30;
       const body_seg_distance = 0.015;
 
       let body_positions = [];
@@ -200,15 +206,32 @@
       }
 
       // === ヒレ用の小さな蛇たち ===
-      const fin_chain_count        = 20;   // ヒレの本数
+      // グループごとの本数
+      const tail_fin_count    = 10; // 尾びれ
+      const dorsal_fin_count  = 6;  // 背びれ
+      const ventral_fin_count = 6;  // 腹のヒレ
+
+      const fin_chain_count =
+        tail_fin_count +
+        dorsal_fin_count +
+        ventral_fin_count;
+
       const fin_segments_per_chain = 20;   // 各ヒレの長さ
       const fin_seg_distance       = 0.01;
 
-      let fin_positions = [];
-      let fin_phase     = [];
+      let fin_positions      = [];
+      let fin_phase          = [];
       let fin_prev_positions = [];
 
-      for (let f = 0; f < fin_chain_count; f++) {
+      // 各フィンチェーンの設定
+      let fin_root_index = [];  // どの body セグメントに付くか
+      let fin_side_sign  = [];  // Sine の左右向き
+
+      // 1) 尾びれグループ（後ろ寄り）
+      for (let i = 0; i < tail_fin_count; i++) {
+        fin_root_index.push(body_count - 11);                 // 尾の少し手前
+        fin_side_sign.push((i % 2 === 0) ? 1.0 : -1.0);       // 交互に左右
+
         fin_phase.push(Math.random() * Math.PI * 2.0);
 
         let arr = [];
@@ -217,26 +240,66 @@
           const x0 = body_positions[body_count - 1].x;
           const y0 = body_positions[body_count - 1].y;
           arr.push({ x: x0, y: y0 });
-          arr_prev.push({ x: x0, y: y0 });   // ★前フレームも同じで初期化
+          arr_prev.push({ x: x0, y: y0 });
         }
         fin_positions.push(arr);
-        fin_prev_positions.push(arr_prev);   // ★追加
+        fin_prev_positions.push(arr_prev);
+      }
+
+      // 2) 背びれグループ（胴体の後ろより中央あたり）
+      for (let i = 0; i < dorsal_fin_count; i++) {
+        fin_root_index.push(Math.floor(body_count * 0.7)); // 少し後ろ寄り
+        fin_side_sign.push(1.0);                           // とりあえず +1 固定
+
+        fin_phase.push(Math.random() * Math.PI * 2.0);
+
+        let arr = [];
+        let arr_prev = [];
+        for (let j = 0; j < fin_segments_per_chain; j++) {
+          const x0 = body_positions[body_count - 1].x;
+          const y0 = body_positions[body_count - 1].y;
+          arr.push({ x: x0, y: y0 });
+          arr_prev.push({ x: x0, y: y0 });
+        }
+        fin_positions.push(arr);
+        fin_prev_positions.push(arr_prev);
+      }
+
+      // 3) 腹のヒレグループ（胴体の前〜中央）
+      for (let i = 0; i < ventral_fin_count; i++) {
+        fin_root_index.push(Math.floor(body_count * 0.3)); // 少し前寄り
+        fin_side_sign.push(-1.0);                          // とりあえず -1 固定
+
+        fin_phase.push(Math.random() * Math.PI * 2.0);
+
+        let arr = [];
+        let arr_prev = [];
+        for (let j = 0; j < fin_segments_per_chain; j++) {
+          const x0 = body_positions[body_count - 1].x;
+          const y0 = body_positions[body_count - 1].y;
+          arr.push({ x: x0, y: y0 });
+          arr_prev.push({ x: x0, y: y0 });
+        }
+        fin_positions.push(arr);
+        fin_prev_positions.push(arr_prev);
       }
 
       const total_segments = body_count + fin_chain_count * fin_segments_per_chain;
-
-      if (total_segments > 256) {
+      if (total_segments > 512) {
         console.warn("Too many segments for MAX_SEGMENTS");
       }
 
       // === 本体＋ヒレを更新して uniform に送る ===
       function update_snake_and_fins(time_sec) {
-          for (let f = 0; f < fin_chain_count; f++) {
-            for (let j = 0; j < fin_segments_per_chain; j++) {
-              fin_prev_positions[f][j].x = fin_positions[f][j].x;
-              fin_prev_positions[f][j].y = fin_positions[f][j].y;
-            }
+
+        // 一応前フレームを保存（今は使っていないが残しておく）
+        for (let f = 0; f < fin_chain_count; f++) {
+          for (let j = 0; j < fin_segments_per_chain; j++) {
+            fin_prev_positions[f][j].x = fin_positions[f][j].x;
+            fin_prev_positions[f][j].y = fin_positions[f][j].y;
           }
+        }
+
         // 頭はマウス位置
         body_positions[0].x = mouse_loc.x;
         body_positions[0].y = mouse_loc.y;
@@ -260,14 +323,13 @@
           }
         }
 
-        // 尻尾の向きと法線
-        const parentIndex = body_count - 11;
-        const parentPos   = body_positions[parentIndex];
-
-
-        // ====== ヒレチェーンの更新（チェーン追従だけにする） ======
+        // ====== ヒレチェーンの更新（チェーン追従） ======
         for (let f = 0; f < fin_chain_count; f++) {
-          // 根元は必ず「親の胴体セグメント」に固定
+          // このフィンチェーン専用の親インデックス
+          const parentIndex = fin_root_index[f];
+          const parentPos   = body_positions[parentIndex];
+
+          // 根元は必ず「自分の親の胴体セグメント」に固定
           fin_positions[f][0].x = parentPos.x;
           fin_positions[f][0].y = parentPos.y;
 
@@ -290,50 +352,49 @@
             }
           }
         }
+
         // ====== ひらめき（サイン波オフセット）を追加 ======
-      const base_amp   = 0.005; // 揺れの最大振幅（UV空間）※小さめから調整
-      const base_speed = 0.4;   // 揺れの速さ
+        const base_amp   = 0.005; // 揺れの最大振幅（UV空間）
+        const base_speed = 0.4;   // 揺れの速さ
 
-      for (let f = 0; f < fin_chain_count; f++) {
-        const phase = fin_phase[f];
-        const side  = (f % 2 === 0) ? 1.0 : -1.0; // 左右に揺れの向きを変える
+        for (let f = 0; f < fin_chain_count; f++) {
+          const phase = fin_phase[f];
+          const side  = fin_side_sign[f]; // 各フィンごとの左右設定
 
-        // 根元(j=0)は触らない（親にガチ固定のまま）
-        for (let j = 1; j < fin_segments_per_chain; j++) {
-          const prev = fin_positions[f][j - 1];
-          const curr = fin_positions[f][j];
+          // 根元(j=0)は触らない（親にガチ固定のまま）
+          for (let j = 1; j < fin_segments_per_chain; j++) {
+            const prev = fin_positions[f][j - 1];
+            const curr = fin_positions[f][j];
 
-          // ローカル方向（このセグメントがどっち向きについているか）
-          let dx = curr.x - prev.x;
-          let dy = curr.y - prev.y;
-          const len = Math.hypot(dx, dy);
-          if (len < 1e-6) continue;
-          dx /= len;
-          dy /= len;
+            // ローカル方向（このセグメントがどっち向きについているか）
+            let dx = curr.x - prev.x;
+            let dy = curr.y - prev.y;
+            const len = Math.hypot(dx, dy);
+            if (len < 1e-6) continue;
+            dx /= len;
+            dy /= len;
 
-          // ローカル法線（チェーンに対して直角方向）
-          let nx = -dy;
-          let ny =  dx;
+            // ローカル法線（チェーンに対して直角方向）
+            let nx = -dy;
+            let ny =  dx;
 
-          // 0〜1（根元0, 先端1）
-          const t = j / (fin_segments_per_chain - 1);
+            // 0〜1（根元0, 先端1）
+            const t = j / (fin_segments_per_chain - 1);
 
-          // 先端ほどよく動くように振幅をスケール
-          const amp   = base_amp * t;
-          const omega = base_speed;
+            // 先端ほどよく動くように振幅をスケール
+            const amp   = base_amp * t;
+            const omega = base_speed;
 
-          // 時間＋節番号＋フィンごと位相でサイン波
-          const w = Math.sin(omega * time_sec + phase + t * 4.0);
+            // 時間＋節番号＋フィンごと位相でサイン波
+            const w = Math.sin(omega * time_sec + phase + t * 4.0);
 
-          // サイン波オフセット（左右を side で分ける）
-          const offset = w * amp * side;
+            // サイン波オフセット（左右を side で分ける）
+            const offset = w * amp * side;
 
-          fin_positions[f][j].x += nx * offset;
-          fin_positions[f][j].y += ny * offset;
+            fin_positions[f][j].x += nx * offset;
+            fin_positions[f][j].y += ny * offset;
+          }
         }
-      }
-
-
 
         // 本体＋ヒレを 1 本の配列にまとめて GPU へ送る
         const segment_data = new Float32Array(total_segments * 2);

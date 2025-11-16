@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>Shader Sandbox 300x300</title>
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      background: #000;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    canvas {
+      width: 300px;
+      height: 300px;
+      border: 1px solid #444;
+    }
+  </style>
+</head>
+<body>
+<canvas id="glcanvas" width="300" height="300"></canvas>
+
+<script>
+// ========== Vertex Shader ==========
+const VERT_SRC = `#version 300 es
+in vec2 a_position;
+void main() {
+    gl_Position = vec4(a_position, 0.0, 1.0);
+}
+`;
+
+// ========== Fragment Shader ==========
+const FRAG_SRC = `#version 300 es
+precision mediump float;
+out vec4 colour_out;
+
+uniform vec2 u_resolution;
+uniform vec2 u_mouse;
+uniform float u_time;
+
+// 2乗ノルムのヘルパー
+float dot2(vec2 v) {
+    return dot(v, v);
+}
+
+// ベジエ曲線 SDF
+float sdBezier(in vec2 pos, in vec2 A, in vec2 B, in vec2 C)
+{
+    vec2 a = B - A;
+    vec2 b = A - 2.0 * B + C;
+    vec2 c = a * 2.0;
+    vec2 d = A - pos;
+
+    float kk = 1.0 / dot(b, b + 1e-9); // ゼロ割防止の微小項
+    float kx = kk * dot(a, b);
+    float ky = kk * (2.0 * dot(a, a) + dot(d, b)) / 3.0;
+    float kz = kk * dot(d, a);
+
+    float res = 0.0;
+    float p = ky - kx * kx;
+    float p3 = p * p * p;
+    float q = kx * (2.0 * kx * kx - 3.0 * ky) + kz;
+    float h = q * q + 4.0 * p3;
+
+    if (h >= 0.0)
+    {
+        h = sqrt(h);
+        vec2 x = (vec2(h, -h) - q) / 2.0;
+        vec2 uv = sign(x) * pow(abs(x), vec2(1.0 / 3.0));
+        float t = clamp(uv.x + uv.y - kx, 0.0, 1.0);
+        res = dot2(d + (c + b * t) * t);
+    }
+    else
+    {
+        float z = sqrt(-p);
+        float v = acos(q / (p * z * 2.0)) / 3.0;
+        float m = cos(v);
+        float n = sin(v) * 1.732050808; // sqrt(3)
+        vec3 t = clamp(vec3(m + m, -n - m, n - m) * z - kx, 0.0, 1.0);
+        res = min(
+            dot2(d + (c + b * t.x) * t.x),
+            dot2(d + (c + b * t.y) * t.y)
+        );
+    }
+    return sqrt(res);
+}
+
+// ================== 尾びれ用ベジエ + アニメーション関数 ==================
+float sdTailFin(
+    vec2 p,
+    vec2 A0, vec2 B0, vec2 C0,
+    float freq,
+    float ampB, float ampC,
+    float phaseC
+) {
+    // A0 から見た相対ベクトル
+    vec2 AB0 = B0 - A0;
+    vec2 AC0 = C0 - A0;
+
+    // 半径（A0 からの距離）を固定
+    float rB = length(AB0);
+    float rC = length(AC0);
+
+    // 基本角度（静止時の方向）
+    float baseAngleB = atan(AB0.y, AB0.x);
+    float baseAngleC = atan(AC0.y, AC0.x);
+
+    // 時間による角度変化
+    float t = u_time;
+
+    float angleB = baseAngleB + ampB * sin(t * freq);
+    float angleC = baseAngleC + ampC * sin(t * freq + phaseC);
+
+    // 円周上での新しい位置
+    vec2 A = A0;
+    vec2 B = A0 + rB * vec2(cos(angleB), sin(angleB));
+    vec2 C = A0 + rC * vec2(cos(angleC), sin(angleC));
+
+    // ベジエ曲線からの距離を返す
+    return sdBezier(p, A, B, C);
+}
+
+// ================== main ==================
+void main() {
+    // 正規化座標 [-1,1]（長辺基準）
+    vec2 p = (2.0 * gl_FragCoord.xy - u_resolution.xy) / u_resolution.y;
+
+    // 尾びれのベース形状（静止状態の A0, B0, C0）
+    vec2 A0 = vec2(-0.6, -0.2); // 根元（後で胴体にくっつけるときの接続点になる）
+    vec2 B0 = vec2( 0.0,  0.0);
+    vec2 C0 = vec2( 0.3, -0.0);
+
+    // アニメーションパラメータ
+    float freq   = 0.8;
+    float ampB   = 0.30; // B の振れ幅（ラジアン）
+    float ampC   = 0.45; // C の振れ幅（ラジアン）
+    float phaseC = 0.0;  // C の位相差（遅れ）
+
+    // 尾びれ1本のSDF
+    float dFin1 = sdTailFin(p, A0, B0, C0, freq, ampB, ampC, phaseC);
+    float dFin2 = sdTailFin(p, A0, B0+0.02, C0+0.1, freq, ampB, ampC, phaseC);
+
+    float dFin = min(dFin1, dFin2);
+
+    // 厚みをつけてリボン状に
+    float thickness = 0.02;
+    float edgeSoft  = 0.01;
+    float finMask   = smoothstep(thickness, thickness - edgeSoft, dFin);
+
+    // 色
+    vec3 bgColor  = vec3(0.02, 0.03, 0.06);
+    vec3 finColor = vec3(0.9, 0.3, 0.3);
+
+    vec3 color = mix(bgColor, finColor, finMask);
+    colour_out = vec4(color, 1.0);
+}
+`;
+
+
+
+
+
+// ========== WebGL Setup ==========
+const canvas = document.getElementById('glcanvas');
+const gl = canvas.getContext('webgl2');
+if (!gl) alert("WebGL2 not supported");
+
+// Compile
+function compileShader(gl, type, src) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, src);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(shader));
+    throw new Error("Shader error");
+  }
+  return shader;
+}
+
+const vs = compileShader(gl, gl.VERTEX_SHADER, VERT_SRC);
+const fs = compileShader(gl, gl.FRAGMENT_SHADER, FRAG_SRC);
+
+const program = gl.createProgram();
+gl.attachShader(program, vs);
+gl.attachShader(program, fs);
+gl.linkProgram(program);
+if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+  console.error(gl.getProgramInfoLog(program));
+  throw new Error("Link error");
+}
+gl.useProgram(program);
+
+// Fullscreen Tri
+const quadVerts = new Float32Array([
+  -1, -1,
+   3, -1,
+  -1,  3,
+]);
+
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+
+const vbo = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+gl.bufferData(gl.ARRAY_BUFFER, quadVerts, gl.STATIC_DRAW);
+
+const loc = gl.getAttribLocation(program, "a_position");
+gl.enableVertexAttribArray(loc);
+gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+// Uniforms
+const uResolution = gl.getUniformLocation(program, "u_resolution");
+const uMouse      = gl.getUniformLocation(program, "u_mouse");
+const uTime       = gl.getUniformLocation(program, "u_time");
+
+let mouseX = 0, mouseY = 0;
+
+canvas.addEventListener("mousemove", (e) => {
+  const rect = canvas.getBoundingClientRect();
+  mouseX = e.clientX - rect.left;
+  mouseY = rect.height - (e.clientY - rect.top);
+});
+
+// ========== Render Loop ==========
+const start = performance.now();
+function render() {
+  const t = (performance.now() - start) * 0.001;
+
+  gl.useProgram(program);
+  gl.bindVertexArray(vao);
+
+  // Fixed size
+  gl.viewport(0, 0, 300, 300);
+  gl.uniform2f(uResolution, 300.0, 300.0);
+  gl.uniform2f(uMouse, mouseX, mouseY);
+  gl.uniform1f(uTime, t);
+
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  requestAnimationFrame(render);
+}
+render();
+</script>
+</body>
+</html>
