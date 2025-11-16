@@ -1,0 +1,710 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>Shader Sandbox 300x300</title>
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      background: #000;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    canvas {
+      width: 300px;
+      height: 300px;
+      border: 1px solid #bfbfbf;
+    }
+  </style>
+</head>
+<body>
+<canvas id="glcanvas" width="300" height="300"></canvas>
+
+<script>
+// ========== Vertex Shader ==========
+const VERT_SRC = `#version 300 es
+in vec2 a_position;
+void main() {
+    gl_Position = vec4(a_position, 0.0, 1.0);
+}
+`;
+
+// ========== Fragment Shader ==========
+const FRAG_SRC = `#version 300 es
+precision mediump float;
+out vec4 colour_out;
+
+uniform vec2 u_resolution;
+uniform vec2 u_mouse;
+uniform float u_time;
+
+///////////////////////////////////
+// Modulo 289 without a division (only multiplications)
+vec3 mod289(vec3 x) {
+  return x - floor(x * (1.0 / 289.0)) * 289.0;
+}
+vec2 mod289(vec2 x) {
+  return x - floor(x * (1.0 / 289.0)) * 289.0;
+}
+
+// Modulo 7 without a division
+vec3 mod7(vec3 x) {
+  return x - floor(x * (1.0 / 7.0)) * 7.0;
+}
+
+// Permutation polynomial: (34x^2 + x) mod 289
+vec3 permute(vec3 x) {
+  return mod289((34.0 * x + 1.0) * x);
+}
+
+// Cellular noise, returning F1 and F2 in a vec2.
+// Standard 3x3 search window for good F1 and F2 values
+vec2 cellular(vec2 P) {
+  const float K   = 0.142857142857; // 1/7
+  const float Ko  = 0.428571428571; // 3/7
+  const float jitter = 1.0;         // Less gives more regular pattern
+
+  vec2 Pi = mod289(floor(P));
+  vec2 Pf = fract(P);
+
+  vec3 oi = vec3(-1.0, 0.0, 1.0);
+  vec3 of = vec3(-0.5, 0.5, 1.5);
+
+  vec3 px = permute(Pi.x + oi);
+  vec3 p  = permute(px.x + Pi.y + oi); // p11, p12, p13
+
+  vec3 ox = fract(p * K) - Ko;
+  vec3 oy = mod7(floor(p * K))*K - Ko;
+
+  vec3 dx = Pf.x + 0.5 + jitter * ox;
+  vec3 dy = Pf.y - of + jitter * oy;
+  vec3 d1 = dx * dx + dy * dy; // d11, d12 and d13, squared
+
+  p = permute(px.y + Pi.y + oi); // p21, p22 and p23
+  ox = fract(p * K) - Ko;
+  oy = mod7(floor(p * K))*K - Ko;
+  dx = Pf.x - 0.5 + jitter * ox;
+  dy = Pf.y - of + jitter * oy;
+  vec3 d2 = dx * dx + dy * dy; // d21, d22 and d23, squared
+
+  p = permute(px.z + Pi.y + oi); // p31, p32 and p33
+  ox = fract(p * K) - Ko;
+  oy = mod7(floor(p * K))*K - Ko;
+  dx = Pf.x - 1.5 + jitter * ox;
+  dy = Pf.y - of + jitter * oy;
+  vec3 d3 = dx * dx + dy * dy; // d31, d32 and d33, squared
+
+  // Sort out the two smallest distances (F1, F2)
+  vec3 d1a = min(d1, d2);
+  d2 = max(d1, d2); // Swap to keep candidates for F2
+  d2 = min(d2, d3); // neither F1 nor F2 are now in d3
+  d1 = min(d1a, d2); // F1 is now in d1
+  d2 = max(d1a, d2); // Swap to keep candidates for F2
+
+  d1.xy = (d1.x < d1.y) ? d1.xy : d1.yx; // Swap if smaller
+  d1.xz = (d1.x < d1.z) ? d1.xz : d1.zx; // F1 is in d1.x
+  d1.yz = min(d1.yz, d2.yz);              // F2 is now not in d2.yz
+  d1.y  = min(d1.y, d1.z);                // nor in d1.z
+  d1.y  = min(d1.y, d2.x);                // F2 is in d1.y, we're done.
+
+  return sqrt(d1.xy);
+}
+
+// Demo mapping
+float colorMapping(vec2 xy) {
+  return cellular(xy).x * 2.0 - 1.0;
+}
+///////////////////////////////////
+
+// 2乗ノルムのヘルパー
+float dot2(vec2 v) {
+    return dot(v, v);
+}
+
+float swimPhase() {
+    return u_time * 0.8;
+}
+
+float pectoralPhase(){
+  return u_time * 0.5;
+}
+
+// 胴ひれの初期角度（度数）。好きな値に書き換えてOK。
+const float PEC_BASE_ANGLE_DEG = -75.0;
+
+// 度をラジアンに変換
+float deg2rad(float d) {
+    return d * 3.14159265 / 180.0;
+}
+
+float pectoralSwingOneSide() {
+    float s = sin(pectoralPhase());  // 負の部分は0に潰す → 前には行かない
+    return s;
+}
+
+// 1D Hash. 10 and 10000 aren't ideal, but oh well, good enough
+float hash1(float n) {
+    return fract(sin(n * 10.0) * 10000.0);
+}
+
+// ベジエ曲線 SDF
+float sdBezier(in vec2 pos, in vec2 A, in vec2 B, in vec2 C)
+{
+    vec2 a = B - A;
+    vec2 b = A - 2.0 * B + C;
+    vec2 c = a * 2.0;
+    vec2 d = A - pos;
+
+    float kk = 1.0 / dot(b, b + 1e-9); // ゼロ割防止の微小項
+    float kx = kk * dot(a, b);
+    float ky = kk * (2.0 * dot(a, a) + dot(d, b)) / 3.0;
+    float kz = kk * dot(d, a);
+
+    float res = 0.0;
+    float p = ky - kx * kx;
+    float p3 = p * p * p;
+    float q = kx * (2.0 * kx * kx - 3.0 * ky) + kz;
+    float h = q * q + 4.0 * p3;
+
+    if (h >= 0.0)
+    {
+        h = sqrt(h);
+        vec2 x = (vec2(h, -h) - q) / 2.0;
+        vec2 uv = sign(x) * pow(abs(x), vec2(1.0 / 3.0));
+        float t = clamp(uv.x + uv.y - kx, 0.0, 1.0);
+        res = dot2(d + (c + b * t) * t);
+    }
+    else
+    {
+        float z = sqrt(-p);
+        float v = acos(q / (p * z * 2.0)) / 3.0;
+        float m = cos(v);
+        float n = sin(v) * 1.732050808; // sqrt(3)
+        vec3 t = clamp(vec3(m + m, -n - m, n - m) * z - kx, 0.0, 1.0);
+        res = min(
+            dot2(d + (c + b * t.x) * t.x),
+            dot2(d + (c + b * t.y) * t.y)
+        );
+    }
+    return sqrt(res);
+}
+
+// ================== 尾びれ用ベジエ + アニメーション関数 ==================
+float sdTailFin(
+    vec2 p,
+    vec2 A0, vec2 B0, vec2 C0,
+    float freq,
+    float ampB, float ampC,
+    float phaseC,
+    float thickness
+) {
+    // A0 から見た相対ベクトル
+    vec2 AB0 = B0 - A0;
+    vec2 AC0 = C0 - A0;
+
+    // 半径（A0 からの距離）を固定
+    float rB = length(AB0);
+    float rC = length(AC0);
+
+    // 基本角度（静止時の方向）
+    float baseAngleB = atan(AB0.y, AB0.x);
+    float baseAngleC = atan(AC0.y, AC0.x);
+
+    // 時間による角度変化
+    float angleB = baseAngleB + ampB * sin(swimPhase());
+    float angleC = baseAngleC + ampC * sin(swimPhase() + phaseC);
+
+    // 円周上での新しい位置
+    vec2 A = A0;
+    vec2 B = A0 + rB * vec2(cos(angleB), sin(angleB));
+    vec2 C = A0 + rC * vec2(cos(angleC), sin(angleC));
+
+    // ベジエ曲線からの距離 - thickness で有厚SDFに
+    float dCenter = sdBezier(p, A, B, C);
+    return dCenter - thickness;
+}
+
+// -------------------- 基本SDF --------------------
+float sdCircle(vec2 p, vec2 c, float r) {
+    return length(p - c) - r;
+}
+
+// -------------------- 背骨位置 spinePos(t) --------------------
+vec2 spinePos(float t) {
+    vec2 headPos = vec2(0.0, 0.7);
+    vec2 tailPos = vec2(0.0, -0.2);
+    vec2 spine = mix(headPos, tailPos, t);
+
+    // S字に少し曲げる
+    float bend = -0.2 * sin(3.14159 * (t - 0.2) + swimPhase());
+    spine.x += bend * 0.4;
+
+    return spine;
+}
+
+// -------------------- 半径プロファイル（Catmull–Rom） --------------------
+const int NUM_KEYS = 5;
+const vec2 radiusKeys[NUM_KEYS] = vec2[NUM_KEYS](
+    vec2(0.00, 0.10),  // 頭先端
+    vec2(0.05, 0.12),  // 首
+    vec2(0.20, 0.16),  // 胴体最大
+    vec2(0.80, 0.06),  // 尾の付け根
+    vec2(1.00, 0.02)   // 尾の先端
+);
+
+float catmullRom(float p0, float p1, float p2, float p3, float s) {
+    float s2 = s * s;
+    float s3 = s2 * s;
+    return 0.5 * (
+        2.0 * p1 +
+        (-p0 + p2) * s +
+        (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * s2 +
+        (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * s3
+    );
+}
+
+float radiusProfile(float t) {
+    if (t <= radiusKeys[0].x) return radiusKeys[0].y;
+    if (t >= radiusKeys[NUM_KEYS-1].x) return radiusKeys[NUM_KEYS-1].y;
+
+    int seg = 0;
+    for (int i = 0; i < NUM_KEYS - 1; ++i) {
+        if (t >= radiusKeys[i].x && t <= radiusKeys[i+1].x) {
+            seg = i;
+            break;
+        }
+    }
+
+    int i1 = seg;
+    int i2 = seg + 1;
+    int i0 = max(i1 - 1, 0);
+    int i3 = min(i2 + 1, NUM_KEYS - 1);
+
+    float t1 = radiusKeys[i1].x;
+    float t2 = radiusKeys[i2].x;
+
+    float s = (t - t1) / (t2 - t1);
+
+    float p0 = radiusKeys[i0].y;
+    float p1 = radiusKeys[i1].y;
+    float p2 = radiusKeys[i2].y;
+    float p3 = radiusKeys[i3].y;
+
+    return catmullRom(p0, p1, p2, p3, s);
+}
+
+// -------------------- ベタ胴体 SDF --------------------
+float sdBettaBody(vec2 p) {
+    float d = 1e9;
+    const int N = 30;
+
+    for (int i = 0; i < N; ++i) {
+        float t = float(i) / float(N - 1);
+
+        vec2 spine = spinePos(t);
+        float radius = radiusProfile(t);
+
+        float dc = sdCircle(p, spine, radius);
+        d = min(d, dc);
+    }
+    return d;
+}
+
+// -------------------- 尾びれ (複数線) SDF --------------------
+// -------------------- 尾びれ (複数線) SDF --------------------
+// 汎用バージョン：長さ・太さ・広がりをスケールできる
+// -------------------- 尾びれ / 汎用フィン (複数線) SDF --------------------
+const int MAX_FINS = 32;
+
+// 汎用バージョン：
+//  tAttach           : 胴体のどの位置に付けるか（spine の 0〜1）
+//  numFins           : ひれの本数
+//  lenScaleGlobal    : 全体の長さスケール
+//  thicknessScaleGlobal : 全体の太さスケール
+//  spreadScale       : 扇状の広がりスケール
+//  baseAngleOffset   : 体の接線方向からの角度オフセット（背びれで使える）
+float sdAllTailFins(
+    vec2 p,
+    float tAttach,
+    int   numFins,
+    float lenScaleGlobal,
+    float thicknessScaleGlobal,
+    float spreadScale,
+    float baseAngleOffset
+) {
+    // 取り付け位置
+    float t = clamp(tAttach, 0.0, 1.0);
+    vec2 basePos = spinePos(t);
+
+    // 体の接線方向（head → tail）
+    float dt = 0.02;
+    vec2 tangent = normalize(
+        spinePos(min(t + dt, 1.0)) - spinePos(max(t - dt, 0.0)) + vec2(1e-5)
+    );
+
+    // 接線方向の角度 + オフセット（尾びれでは 0, 背びれなら ±90° を足すなど）
+    float baseAngle = atan(tangent.y, tangent.x) + baseAngleOffset;
+
+    int N = clamp(numFins, 1, MAX_FINS);
+    float spread = 1.0 * spreadScale;
+
+    float d = 1e9;
+
+    for (int i = 0; i < MAX_FINS; ++i) {
+        if (i >= N) break;
+
+        float fi = float(i);
+
+        // -0.5〜+0.5 に正規化（1 本の場合は 0）
+        float denom = max(float(N - 1), 1.0);
+        float u = (fi / denom) - 0.5;
+
+        float angleOffset = u * spread;
+        float angle = baseAngle + angleOffset;
+
+        // ---- 長さ ----
+        float lenScaleLocal = mix(0.8, 1.2, hash1(fi * 5.31));
+        float lenBBase = 0.25 * lenScaleGlobal;
+        float lenCBase = 0.65 * lenScaleGlobal;
+        float lenB = lenBBase * lenScaleLocal;
+        float lenC = lenCBase * lenScaleLocal;
+
+        vec2 dirFin = vec2(cos(angle), sin(angle));
+
+        vec2 A0 = basePos;
+        vec2 B0 = basePos + lenB * dirFin;
+        vec2 C0 = basePos + lenC * dirFin;
+
+        float ampScale = 0.8 + 1.3 * abs(u);
+
+        float freq   = 0.8;
+        float ampB   = 0.10 * ampScale;
+        float ampC   = 0.25 * ampScale;
+        float phaseC = 0.0 + u * 0.5;
+
+        // ---- 太さ ----
+        float baseThickness = 0.008 * thicknessScaleGlobal;
+        float thickScale = mix(0.1, 0.8, hash1(fi * 5.13));
+        float thickness = baseThickness * thickScale;
+
+        float dFin = sdTailFin(
+            p,
+            A0, B0, C0,
+            freq, ampB, ampC, phaseC,
+            thickness
+        );
+
+        d = min(d, dFin);
+    }
+
+    return d;
+}
+
+// 互換用ラッパー（従来の sdAllTailFins(p) もそのまま使える）
+float sdAllTailFins(vec2 p) {
+    // 尾びれ用：spine の 0.9 付近, 24 本, スケールは 1, 角度オフセット 0
+    return sdAllTailFins(p, 0.9, 24, 1.0, 1.0, 1.0, 0.0);
+}
+
+
+// -------------------- 胴ひれ（左右対称） SDF --------------------
+
+// 片側の胴ひれ
+float sdPectoralFin(
+    vec2 p,
+    vec2 basePos,
+    vec2 dirForward,
+    float sideSign
+) {
+    // dirForward: head → tail
+    vec2 f = normalize(dirForward);
+    vec2 n = vec2(-f.y, f.x) * sideSign;  // 体の左右（真横）
+
+    // --- ① 法線 n を角度 PEC_BASE_ANGLE_DEG だけ「後ろ側」に回転させた向き ---
+    float a = deg2rad(PEC_BASE_ANGLE_DEG);
+
+    // n を a 度だけ -f 側に傾けたベクトル
+    vec2 dirBase = normalize(
+        n * cos(a) + (-f) * sin(a)
+    );
+
+    // --- ② ここからさらに「後ろ方向にだけスイング」させる部分 ---
+    float swing = 0.8 * pectoralSwingOneSide();  // 0〜1くらい
+
+    // 根元はあまり動かさず、先端ほど尾側に倒す
+    vec2 dirB = normalize(dirBase + 0.3 * swing * (-f));
+    vec2 dirC = normalize(dirBase + 1.0 * swing * (-f));
+
+    float lenB = 0.12;
+    float lenC = 0.26;
+
+    vec2 A = basePos;
+    vec2 B = basePos + lenB * dirB;
+    vec2 C = basePos + lenC * dirC;
+
+    float thickness = 0.012;
+    float dCenter = sdBezier(p, A, B, C);
+    return dCenter - thickness;
+}
+
+// 片側（左 or 右）に複数本の胴ひれを生やす
+float sdPectoralFinsSide(
+    vec2 p,
+    vec2 basePos,
+    vec2 dirForward,
+    float sideSign
+) {
+    vec2 f = normalize(dirForward);
+    vec2 n = vec2(-f.y, f.x) * sideSign;  // 体の左右（真横）
+
+    // ベース方向：法線 n を PEC_BASE_ANGLE_DEG だけ「尾側」に倒した方向
+    float a = deg2rad(PEC_BASE_ANGLE_DEG);
+    vec2 baseDir = normalize(
+        n * cos(a) + (-f) * sin(a)
+    );
+
+    // ベース方向のグローバル角度
+    float baseAngle = atan(baseDir.y, baseDir.x);
+
+    const int NUM_PEC_FINS = 7;
+    float spread = 0.1;
+
+    float d = 1e9;
+
+    for (int i = 0; i < NUM_PEC_FINS; ++i) {
+        float fi = float(i);
+
+        float u = (fi / float(NUM_PEC_FINS - 1)) - 0.5;
+
+        float angleOffset = u * spread;
+        float angle = baseAngle + angleOffset;
+
+        vec2 dirBaseFin = vec2(cos(angle), sin(angle));
+
+        float swing = 0.7 * pectoralSwingOneSide();
+
+        vec2 dirB = normalize(dirBaseFin + 0.3 * swing * (-f));
+        vec2 dirC = normalize(dirBaseFin + 1.0 * swing * (-f));
+
+        float lenScale = mix(0.9, 1.1,
+                             hash1(fi * 7.31 + (sideSign > 0.0 ? 1.0 : 2.0)));
+
+        float lenBBase = 0.10;
+        float lenCBase = 0.26;
+        float lenB = lenBBase * lenScale;
+        float lenC = lenCBase * lenScale;
+
+        vec2 A = basePos;
+        vec2 B = basePos + lenB * dirB;
+        vec2 C = basePos + lenC * dirC;
+
+        float baseThickness = 0.010;
+        float thickScale = mix(0.2, 0.5,
+                               hash1(fi * 3.17 + (sideSign > 0.0 ? 5.0 : 6.0)));
+        float thickness = baseThickness * thickScale;
+
+        float dFin = sdBezier(p, A, B, C) - thickness;
+        d = min(d, dFin);
+    }
+
+    return d;
+}
+
+float sdAllPectoralFins(vec2 p) {
+    float tBase = 0.35;
+    vec2 spineC = spinePos(tBase);
+
+    // 体の接線（進行方向）
+    vec2 f = normalize(spinePos(tBase + 0.02) - spinePos(tBase - 0.02) + vec2(1e-5));
+    vec2 n = vec2(-f.y, f.x); // 左向き法線
+
+    // この位置での胴体の半径
+    float r = radiusProfile(tBase);
+
+    // 左右の根元位置（胴体の側面）
+    vec2 baseL = spineC + n * r;
+    vec2 baseR = spineC - n * r;
+
+    float dL = sdPectoralFinsSide(p, baseL, f, +1.0);
+    float dR = sdPectoralFinsSide(p, baseR, f, -1.0);
+
+    return min(dL, dR);
+}
+
+// -------------------- main --------------------
+void main() {
+    // 正規化座標 [-1,1]
+    vec2 p = (2.0 * gl_FragCoord.xy - u_resolution.xy) / u_resolution.y;
+
+    // SDF をそれぞれ別に計算
+    float dBody = sdBettaBody(p);
+    float dTail = sdAllTailFins(p, 0.9, 32, 1.0, 1.0, 1.0, 0.0);;
+    float dPec  = sdAllPectoralFins(p);
+
+    float dTailThin = sdAllTailFins(p, 0.9, 8, 0.9, 0.4, 1.0, 0.0);
+
+    float dBack = sdAllTailFins(p, 0.3, 24, 1.0, 0.4, 0.4, 0.0);
+
+    // 色設定
+    vec3 bg      = vec3(0.8, 0.95, 1.0);
+    vec3 bodyCol = vec3(0.9, 0.25, 0.3);
+    vec3 pecCol  = bodyCol;
+    vec3 tailCol = vec3(0.9, 0.3, 0.3);  // 尾びれは少し明るめに
+    vec3 backCol = vec3(0.9, 0.3, 0.3);
+
+    // 各パーツのマスク（エッジをなめらかに）
+    float bodyMask = smoothstep(0.02, 0.0, dBody);
+    float pecMask  = smoothstep(0.02, 0.0, dPec);
+    float tailMask = smoothstep(0.02, 0.0, dTail);
+
+    float tailMaskThin = smoothstep(0.02, 0.0, dTailThin);
+
+    float backMask = smoothstep(0.02, 0.0, dBack);
+
+    // レイヤー順に合成：背景 → 胴体 → 胴ひれ → （半透明）尾びれ
+    vec3 color = bg;
+
+    // 胴体（ほぼ不透明に見える合成）
+    float bodyAlpha = 0.9;
+    float bodyBlend = bodyMask * bodyAlpha;
+    color = mix(color, bodyCol, bodyBlend);
+
+    // 胴ひれ（同じく不透明寄り）
+    float backAlpha = 0.6;                    
+    float backBlend = backMask * backAlpha;
+    color = mix(color, backCol, backBlend);
+
+    // 胴ひれ（同じく不透明寄り）
+    float pecAlpha = 0.76;                    
+    float pecBlend = pecMask * pecAlpha;
+    color = mix(color, pecCol, pecBlend);
+
+    // 尾びれ：半透明（重ねると少し下が透けるイメージ）
+    float tailAlpha = 0.6;                     // 尾びれの基準透明度
+    float tailBlend = tailMask * tailAlpha;    
+    color = mix(color, tailCol, tailBlend);
+
+    float tailAlphaThin = 0.7;                     // 尾びれの基準透明度
+    float tailBlendThin = tailMaskThin * tailAlphaThin;    
+    color = mix(color, tailCol, tailBlendThin);
+
+    ///////////////////
+    //noise from https://www.redblobgames.com/x/2107-webgl-noise/webgl-noise/webdemo/cellular.html
+    //NOISE!!!! The worley noise 2D defined here
+    float t = u_time;
+    // ===== 1枚目のノイズレイヤー =====
+    vec2 uv = gl_FragCoord.xy / u_resolution.xy;
+    vec2 uv1 = uv * u_resolution.xy / min(u_resolution.x, u_resolution.y);
+    float n1 = colorMapping(uv1 * 4.0 + vec2(t * 0.3, t * 0.1));          // 大きめの模様
+    float v1 = 0.5 + 0.5 * n1;                   // [0,1]
+    vec3 col1 = vec3(v1);
+    float alpha1 = v1 * 0.3;                     // 透け具合
+
+    color = mix(color, col1, alpha1);
+
+    // ===== 2枚目のノイズレイヤー =====
+    // スケールやオフセット、時間を変えて別パターンにする
+    vec2 uv2 = uv * u_resolution.xy / min(u_resolution.x, u_resolution.y);
+
+    // 例: 細かい模様 + 時間で流れる
+    float n2 = colorMapping(uv2 * 12.0 + vec2(u_time * 0.4, u_time * 0.7));
+    float v2 = 0.5 + 0.5 * n2;
+    vec3 col2 = vec3(v2);
+
+    // 2枚目は弱めに乗せる
+    float alpha2 = v2 * 0.2;
+
+    color = mix(color, col2, alpha2);
+
+    colour_out = vec4(color, 1.0);
+}
+`;
+
+// ========== WebGL Setup ==========
+const canvas = document.getElementById('glcanvas');
+const gl = canvas.getContext('webgl2');
+if (!gl) alert("WebGL2 not supported");
+
+// ここはそのままでOK（将来別パス描くときにも使える）
+gl.enable(gl.BLEND);
+gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+function compileShader(gl, type, src) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, src);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(shader));
+    throw new Error("Shader error");
+  }
+  return shader;
+}
+
+const vs = compileShader(gl, gl.VERTEX_SHADER, VERT_SRC);
+const fs = compileShader(gl, gl.FRAGMENT_SHADER, FRAG_SRC);
+
+const program = gl.createProgram();
+gl.attachShader(program, vs);
+gl.attachShader(program, fs);
+gl.linkProgram(program);
+if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+  console.error(gl.getProgramInfoLog(program));
+  throw new Error("Link error");
+}
+gl.useProgram(program);
+
+// Fullscreen Tri
+const quadVerts = new Float32Array([
+  -1, -1,
+   3, -1,
+  -1,  3,
+]);
+
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+
+const vbo = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+gl.bufferData(gl.ARRAY_BUFFER, quadVerts, gl.STATIC_DRAW);
+
+const loc = gl.getAttribLocation(program, "a_position");
+gl.enableVertexAttribArray(loc);
+gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+// Uniforms
+const uResolution = gl.getUniformLocation(program, "u_resolution");
+const uMouse      = gl.getUniformLocation(program, "u_mouse");
+const uTime       = gl.getUniformLocation(program, "u_time");
+
+let mouseX = 0, mouseY = 0;
+
+canvas.addEventListener("mousemove", (e) => {
+  const rect = canvas.getBoundingClientRect();
+  mouseX = e.clientX - rect.left;
+  mouseY = rect.height - (e.clientY - rect.top);
+});
+
+// ========== Render Loop ==========
+const start = performance.now();
+function render() {
+  const t = (performance.now() - start) * 0.001;
+
+  gl.useProgram(program);
+  gl.bindVertexArray(vao);
+
+  gl.viewport(0, 0, 300, 300);
+  gl.uniform2f(uResolution, 300.0, 300.0);
+  gl.uniform2f(uMouse, mouseX, mouseY);
+  gl.uniform1f(uTime, t);
+
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  requestAnimationFrame(render);
+}
+render();
+</script>
+</body>
+</html>
