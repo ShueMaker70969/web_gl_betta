@@ -41,8 +41,6 @@ uniform vec2 u_resolution;
 uniform vec2 u_mouse;
 uniform float u_time;
 
-
-
 // 2乗ノルムのヘルパー
 float dot2(vec2 v) {
     return dot(v, v);
@@ -66,7 +64,7 @@ float deg2rad(float d) {
 
 float pectoralSwingOneSide() {
     float s = sin(pectoralPhase());  // 負の部分は0に潰す → 前には行かない
-    return s;      // ちょっと平方して、ピクッと倒れてゆっくり戻る感じに
+    return s;
 }
 
 // 1D Hash. 10 and 10000 aren't ideal, but oh well, good enough
@@ -123,7 +121,7 @@ float sdTailFin(
     float freq,
     float ampB, float ampC,
     float phaseC,
-    float thickness   // ← 追加：この線の太さ
+    float thickness
 ) {
     // A0 から見た相対ベクトル
     vec2 AB0 = B0 - A0;
@@ -158,8 +156,8 @@ float sdCircle(vec2 p, vec2 c, float r) {
 
 // -------------------- 背骨位置 spinePos(t) --------------------
 vec2 spinePos(float t) {
-    vec2 headPos = vec2(0.2, 0.6);
-    vec2 tailPos = vec2(0.1, -0.3);
+    vec2 headPos = vec2(0.0, 0.7);
+    vec2 tailPos = vec2(0.0, -0.2);
     vec2 spine = mix(headPos, tailPos, t);
 
     // S字に少し曲げる
@@ -238,36 +236,69 @@ float sdBettaBody(vec2 p) {
 }
 
 // -------------------- 尾びれ (複数線) SDF --------------------
-float sdAllTailFins(vec2 p) {
-    float tTailBase = 0.9;
-    vec2 tailBase = spinePos(tTailBase);
+// -------------------- 尾びれ (複数線) SDF --------------------
+// 汎用バージョン：長さ・太さ・広がりをスケールできる
+// -------------------- 尾びれ / 汎用フィン (複数線) SDF --------------------
+const int MAX_FINS = 32;
 
-    vec2 dir = normalize(spinePos(1.0) - spinePos(0.8) + vec2(1e-5));
-    float baseAngle = atan(dir.y, dir.x);
+// 汎用バージョン：
+//  tAttach           : 胴体のどの位置に付けるか（spine の 0〜1）
+//  numFins           : ひれの本数
+//  lenScaleGlobal    : 全体の長さスケール
+//  thicknessScaleGlobal : 全体の太さスケール
+//  spreadScale       : 扇状の広がりスケール
+//  baseAngleOffset   : 体の接線方向からの角度オフセット（背びれで使える）
+float sdAllTailFins(
+    vec2 p,
+    float tAttach,
+    int   numFins,
+    float lenScaleGlobal,
+    float thicknessScaleGlobal,
+    float spreadScale,
+    float baseAngleOffset
+) {
+    // 取り付け位置
+    float t = clamp(tAttach, 0.0, 1.0);
+    vec2 basePos = spinePos(t);
 
-    const int NUM_FINS = 24;
-    float spread = 1.2;
+    // 体の接線方向（head → tail）
+    float dt = 0.02;
+    vec2 tangent = normalize(
+        spinePos(min(t + dt, 1.0)) - spinePos(max(t - dt, 0.0)) + vec2(1e-5)
+    );
+
+    // 接線方向の角度 + オフセット（尾びれでは 0, 背びれなら ±90° を足すなど）
+    float baseAngle = atan(tangent.y, tangent.x) + baseAngleOffset;
+
+    int N = clamp(numFins, 1, MAX_FINS);
+    float spread = 1.0 * spreadScale;
 
     float d = 1e9;
 
-    for (int i = 0; i < NUM_FINS; ++i) {
+    for (int i = 0; i < MAX_FINS; ++i) {
+        if (i >= N) break;
+
         float fi = float(i);
 
-        float u = (fi / float(NUM_FINS - 1)) - 0.5; // -0.5〜0.5
+        // -0.5〜+0.5 に正規化（1 本の場合は 0）
+        float denom = max(float(N - 1), 1.0);
+        float u = (fi / denom) - 0.5;
+
         float angleOffset = u * spread;
         float angle = baseAngle + angleOffset;
 
-        float lenScale = mix(0.8, 1.2, hash1(fi * 5.31));
-        float lenBBase = 0.25;
-        float lenCBase = 0.65;
-        float lenB = lenBBase * lenScale;
-        float lenC = lenCBase * lenScale;
+        // ---- 長さ ----
+        float lenScaleLocal = mix(0.8, 1.2, hash1(fi * 5.31));
+        float lenBBase = 0.25 * lenScaleGlobal;
+        float lenCBase = 0.65 * lenScaleGlobal;
+        float lenB = lenBBase * lenScaleLocal;
+        float lenC = lenCBase * lenScaleLocal;
 
         vec2 dirFin = vec2(cos(angle), sin(angle));
 
-        vec2 A0 = tailBase;
-        vec2 B0 = tailBase + lenB * dirFin;
-        vec2 C0 = tailBase + lenC * dirFin;
+        vec2 A0 = basePos;
+        vec2 B0 = basePos + lenB * dirFin;
+        vec2 C0 = basePos + lenC * dirFin;
 
         float ampScale = 0.8 + 1.3 * abs(u);
 
@@ -276,7 +307,8 @@ float sdAllTailFins(vec2 p) {
         float ampC   = 0.25 * ampScale;
         float phaseC = 0.0 + u * 0.5;
 
-        float baseThickness = 0.008;
+        // ---- 太さ ----
+        float baseThickness = 0.008 * thicknessScaleGlobal;
         float thickScale = mix(0.1, 0.8, hash1(fi * 5.13));
         float thickness = baseThickness * thickScale;
 
@@ -293,6 +325,13 @@ float sdAllTailFins(vec2 p) {
     return d;
 }
 
+// 互換用ラッパー（従来の sdAllTailFins(p) もそのまま使える）
+float sdAllTailFins(vec2 p) {
+    // 尾びれ用：spine の 0.9 付近, 24 本, スケールは 1, 角度オフセット 0
+    return sdAllTailFins(p, 0.9, 24, 1.0, 1.0, 1.0, 0.0);
+}
+
+
 // -------------------- 胴ひれ（左右対称） SDF --------------------
 
 // 片側の胴ひれ
@@ -307,15 +346,12 @@ float sdPectoralFin(
     vec2 n = vec2(-f.y, f.x) * sideSign;  // 体の左右（真横）
 
     // --- ① 法線 n を角度 PEC_BASE_ANGLE_DEG だけ「後ろ側」に回転させた向き ---
-    // 正方向の角度を「尾側（-f 側）」に倒すルールにしています。
     float a = deg2rad(PEC_BASE_ANGLE_DEG);
 
     // n を a 度だけ -f 側に傾けたベクトル
     vec2 dirBase = normalize(
         n * cos(a) + (-f) * sin(a)
     );
-    // a = 0°  → dirBase = n（体の真横）
-    // a > 0° → dirBase が斜め後ろ向きになる
 
     // --- ② ここからさらに「後ろ方向にだけスイング」させる部分 ---
     float swing = 0.8 * pectoralSwingOneSide();  // 0〜1くらい
@@ -339,9 +375,9 @@ float sdPectoralFin(
 // 片側（左 or 右）に複数本の胴ひれを生やす
 float sdPectoralFinsSide(
     vec2 p,
-    vec2 basePos,    // この側の根元位置（胴の側面）
-    vec2 dirForward, // spine の接線（head → tail）
-    float sideSign   // +1: 左側, -1: 右側
+    vec2 basePos,
+    vec2 dirForward,
+    float sideSign
 ) {
     vec2 f = normalize(dirForward);
     vec2 n = vec2(-f.y, f.x) * sideSign;  // 体の左右（真横）
@@ -355,32 +391,26 @@ float sdPectoralFinsSide(
     // ベース方向のグローバル角度
     float baseAngle = atan(baseDir.y, baseDir.x);
 
-    const int NUM_PEC_FINS = 7;  // この側のひれの本数
-    float spread = 0.1;          // 扇状に広げる角度（ラジアン）
+    const int NUM_PEC_FINS = 7;
+    float spread = 0.1;
 
     float d = 1e9;
 
     for (int i = 0; i < NUM_PEC_FINS; ++i) {
         float fi = float(i);
 
-        // -0.5 ～ +0.5 に正規化（真ん中のひれが u=0）
         float u = (fi / float(NUM_PEC_FINS - 1)) - 0.5;
 
-        // 扇状に広げるための角度オフセット
         float angleOffset = u * spread;
         float angle = baseAngle + angleOffset;
 
-        // このひれの基準方向
         vec2 dirBaseFin = vec2(cos(angle), sin(angle));
 
-        // 後ろ方向にだけ倒れるスイング（強度）
         float swing = 0.7 * pectoralSwingOneSide();
 
-        // 根元側と先端側でスイング量を変えて「しなり」を出す
         vec2 dirB = normalize(dirBaseFin + 0.3 * swing * (-f));
         vec2 dirC = normalize(dirBaseFin + 1.0 * swing * (-f));
 
-        // ------ ランダムな長さスケール ------
         float lenScale = mix(0.9, 1.1,
                              hash1(fi * 7.31 + (sideSign > 0.0 ? 1.0 : 2.0)));
 
@@ -393,7 +423,6 @@ float sdPectoralFinsSide(
         vec2 B = basePos + lenB * dirB;
         vec2 C = basePos + lenC * dirC;
 
-        // ------ ランダムな太さスケール ------
         float baseThickness = 0.010;
         float thickScale = mix(0.2, 0.5,
                                hash1(fi * 3.17 + (sideSign > 0.0 ? 5.0 : 6.0)));
@@ -405,7 +434,6 @@ float sdPectoralFinsSide(
 
     return d;
 }
-
 
 float sdAllPectoralFins(vec2 p) {
     float tBase = 0.35;
@@ -428,30 +456,63 @@ float sdAllPectoralFins(vec2 p) {
     return min(dL, dR);
 }
 
-
 // -------------------- main --------------------
 void main() {
     // 正規化座標 [-1,1]
     vec2 p = (2.0 * gl_FragCoord.xy - u_resolution.xy) / u_resolution.y;
 
-    // 胴体
+    // SDF をそれぞれ別に計算
     float dBody = sdBettaBody(p);
+    float dTail = sdAllTailFins(p, 0.9, 32, 1.0, 1.0, 1.0, 0.0);;
+    float dPec  = sdAllPectoralFins(p);
 
-    // 尾びれ
-    float dTail = sdAllTailFins(p);
+    float dTailThin = sdAllTailFins(p, 0.9, 8, 0.9, 0.4, 1.0, 0.0);
 
-    // 胴ひれ（左右）
-    float dPec = sdAllPectoralFins(p);
+    float dBack = sdAllTailFins(p, 0.3, 24, 1.0, 0.4, 0.4, 0.0);
 
-    // 胴体 + 尾びれ + 胴ひれ の union
-    float d = min(dBody, min(dTail, dPec));
-
-    vec3 bg      = vec3(0.02, 0.03, 0.08);
+    // 色設定
+    vec3 bg      = vec3(0.8, 0.95, 1.0);
     vec3 bodyCol = vec3(0.9, 0.25, 0.3);
+    vec3 pecCol  = bodyCol;
+    vec3 tailCol = vec3(0.9, 0.3, 0.3);  // 尾びれは少し明るめに
+    vec3 backCol = vec3(0.9, 0.3, 0.3);
 
-    float mask = smoothstep(0.02, 0.0, d);
+    // 各パーツのマスク（エッジをなめらかに）
+    float bodyMask = smoothstep(0.02, 0.0, dBody);
+    float pecMask  = smoothstep(0.02, 0.0, dPec);
+    float tailMask = smoothstep(0.02, 0.0, dTail);
 
-    vec3 color = mix(bg, bodyCol, mask);
+    float tailMaskThin = smoothstep(0.02, 0.0, dTailThin);
+
+    float backMask = smoothstep(0.02, 0.0, dBack);
+
+    // レイヤー順に合成：背景 → 胴体 → 胴ひれ → （半透明）尾びれ
+    vec3 color = bg;
+
+    // 胴体（ほぼ不透明に見える合成）
+    float bodyAlpha = 0.9;
+    float bodyBlend = bodyMask * bodyAlpha;
+    color = mix(color, bodyCol, bodyBlend);
+
+    // 胴ひれ（同じく不透明寄り）
+    float backAlpha = 0.6;                    
+    float backBlend = backMask * backAlpha;
+    color = mix(color, backCol, backBlend);
+
+    // 胴ひれ（同じく不透明寄り）
+    float pecAlpha = 0.76;                    
+    float pecBlend = pecMask * pecAlpha;
+    color = mix(color, pecCol, pecBlend);
+
+    // 尾びれ：半透明（重ねると少し下が透けるイメージ）
+    float tailAlpha = 0.6;                     // 尾びれの基準透明度
+    float tailBlend = tailMask * tailAlpha;    
+    color = mix(color, tailCol, tailBlend);
+
+    float tailAlphaThin = 0.7;                     // 尾びれの基準透明度
+    float tailBlendThin = tailMaskThin * tailAlphaThin;    
+    color = mix(color, tailCol, tailBlendThin);
+
     colour_out = vec4(color, 1.0);
 }
 `;
@@ -460,6 +521,8 @@ void main() {
 const canvas = document.getElementById('glcanvas');
 const gl = canvas.getContext('webgl2');
 if (!gl) alert("WebGL2 not supported");
+
+// ここはそのままでOK（将来別パス描くときにも使える）
 gl.enable(gl.BLEND);
 gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
